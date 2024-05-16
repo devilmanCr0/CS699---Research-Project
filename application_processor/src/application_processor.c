@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "board_link.h"
 #include "simple_flash.h"
@@ -111,6 +112,11 @@ flash_entry flash_status;
 RsaKey AP_AT_PRIV;
 WC_RNG AP_rng;
 
+// Stores PIN and other globals for Rust export
+const uint8_t* PIN_HEAD = PIN;
+const uint8_t* TOKEN_HEAD = TOKEN;
+const int PIN_SIZE = PIN_BUFSIZE;
+const int HASH_LENGTH = HASH_SIZE;
 // Stores the public key for the COMP Data and secure communication
 RsaKey COMP_PUB;
 
@@ -126,7 +132,7 @@ RsaKey COMP_PUB;
  * This function must be implemented by your team to align with the security requirements.
 
 */
-int secure_send(uint8_t address, volatile uint8_t* buffer, volatile uint8_t len) {
+int secure_send(uint8_t address, uint8_t* buffer, volatile uint8_t len) {
     // Use components public key to send messages yay
     // Hash the original buffer first, and append this to the message
     uint8_t encrypt_buffer[MAX_I2C_MESSAGE_LEN-1]; // regardless of input, rsa ciphertext will be equal to the modulus
@@ -182,7 +188,7 @@ skip:
  * Securely receive data over I2C. This function is utilized in POST_BOOT functionality.
  * This function must be implemented by your team to align with the security requirements.
 */
-int secure_receive(i2c_addr_t address, volatile uint8_t* buffer) {
+int secure_receive(i2c_addr_t address, uint8_t* buffer) {
     // Use AP's private key to decrypt and validate the message 
     // Expect two messages.. the ciphertext and the hash
     uint8_t decrypted_buffer[MAX_I2C_MESSAGE_LEN-1];; 
@@ -226,22 +232,6 @@ skip:
     memcpy(buffer, decrypted_buffer, len);
 
     return len;
-}
-
-/**
- * @brief Get Provisioned IDs
- * 
- * @param uint32_t* buffer
- * 
- * @return int: number of ids
- * 
- * Return the currently provisioned IDs and the number of provisioned IDs
- * for the current AP. This functionality is utilized in POST_BOOT functionality.
- * This function must be implemented by your team.
-*/
-int get_provisioned_ids(uint32_t* buffer) {
-    memcpy(buffer, flash_status.component_ids, flash_status.component_cnt * sizeof(uint32_t));
-    return flash_status.component_cnt;
 }
 
 /********************************* UTILITIES **********************************/
@@ -354,11 +344,30 @@ int init_comp_pub_key(RsaKey* key, uint8_t* DER_Key, int len)
     return 0;
 }
 
+void print_stuff(int print_type, char* format, ...) {
+        va_list args;
+        va_start(args, format);
+        switch (print_type) {
+        case 0: print_info(format, args);
+                break;
+        case 1: print_success(format, args);
+                break;
+        case 2: print_error(format, args);
+                break;
+        default:break;
+        }
+        va_end(args);
+
+        return;
+}       
 
 typedef struct {
 	int rand;
 	int timestamp;
 } plain_nonce;
+
+
+//nonce_t generate_nonce(void);
 
 nonce_t generate_nonce(void)
 {
@@ -376,156 +385,16 @@ nonce_t generate_nonce(void)
 }
 
 // Send a command to a component and receive the result
-int issue_cmd(i2c_addr_t addr, uint8_t* transmit, uint8_t* receive) {
-    // Send message
-	// TODO: secure_send(addr, transmit, sizeof(command_message)) doesn't work because:
-    //   sizeof(command_message) : 256
-    //   uint8_t len: 0-255
-    int result = secure_send(addr, transmit, sizeof(nonce_t) + 1); // sizeof(nonce) + sizeof(opcode)
-    if (result == ERROR_RETURN) {
-        return ERROR_RETURN;
-    }
-    
-    // Receive message
-    int len = secure_receive(addr, receive);
-    if (len == ERROR_RETURN) {
-        return ERROR_RETURN;
-    }
-    return len;
-}
 
 /******************************** COMPONENT COMMS ********************************/
-
-int scan_components(void) {
-    // Print out provisioned component IDs
-    int count = flash_status.component_cnt;
-  
-    // Buffers for board link communication
-    uint8_t receive_buffer[MAX_I2C_MESSAGE_LEN];
-    uint8_t transmit_buffer[MAX_I2C_MESSAGE_LEN];
-
-
-    for (int i = 0; i < flash_status.component_cnt; i++) {
-        print_info("P>0x%08x\n", flash_status.component_ids[i]);
-
-        i2c_addr_t addr = component_id_to_i2c_addr(flash_status.component_ids[i]);
-        
-        if (addr == 0x18 || addr == 0x28 || addr == 0x36) {
-            continue;
-        }
-
-        // Generate nonce1 for validating component
-        const nonce_t nonce1 = generate_nonce();
-
-        // Create command message
-        command_message* command = (command_message*) transmit_buffer;
-        command->opcode = COMPONENT_CMD_SCAN;
-        memcpy(command->params, &nonce1, sizeof(nonce_t)); // Request the component to send this nonce1 back
-
-        // Send out command and receive result
-        int len = issue_cmd(addr, transmit_buffer, receive_buffer);
-        if (len == ERROR_RETURN) {
-            print_error("command failed\n");
-            continue;
-        }
-
-        validate_message* validate = (validate_message*) receive_buffer;
-
-        // Remake validate_message structure
-        if (validate->nonce1 != nonce1) {
-            print_error("nonce1 value: %u invalid\n", validate->nonce1);
-            continue;
-        }
-          
-        // Success, device is present
-        print_info("F>0x%08x\n", validate->component_id);
-
-        if(validate->component_id == flash_status.component_ids[i]) {
-                count--; 
-        }
-    }
-
-    if(count != 0){
-       print_error("List failed\n");
-       return ERROR_RETURN;
-    }
-
-    print_success("List\n");
-    return SUCCESS_RETURN;
-  
-}
-
-
-
-int validate_components(nonce_t *nonce2) {
-    // Buffers for board link communication
-    uint8_t receive_buffer[MAX_I2C_MESSAGE_LEN];
-    uint8_t transmit_buffer[MAX_I2C_MESSAGE_LEN];
-
-    // Send validate command to each component
-    for (unsigned i = 0; i < flash_status.component_cnt; i++) {
-        // Set the I2C address of the component
-        i2c_addr_t addr = component_id_to_i2c_addr(flash_status.component_ids[i]);
-
-        // Generate nonce1 for validating component
-        const nonce_t nonce1 = generate_nonce();
-
-        // Create command message
-        command_message* command = (command_message*) transmit_buffer;
-        command->opcode = COMPONENT_CMD_VALIDATE;
-        memcpy(command->params, &nonce1, sizeof(nonce_t)); // Request the component to send this nonce1 back
-
-        // Send out command and receive result
-        int len = issue_cmd(addr, transmit_buffer, receive_buffer);
-        if (len == ERROR_RETURN) {
-            print_error("Could not validate component\n");
-            return ERROR_RETURN;
-        }
-
-        validate_message* validate = (validate_message*) receive_buffer;
-
-        // Remake validate_message structure
-        if (validate->nonce1 != nonce1) {
-            print_error("nonce1 value: %u invalid\n", validate->nonce1);
-            return ERROR_RETURN;
-        }
-        // Check that the result is correct
-        if (validate->component_id != flash_status.component_ids[i]) {
-            print_error("Component ID: 0x%08x invalid\n", flash_status.component_ids[i]);
-            return ERROR_RETURN;
-        }
-        nonce2[i] = validate->nonce2;
-    }
-    return SUCCESS_RETURN;
-}
-
-int boot_components(nonce_t *nonce2) {
-    // Buffers for board link communication
-    uint8_t receive_buffer[MAX_I2C_MESSAGE_LEN];
-    uint8_t transmit_buffer[MAX_I2C_MESSAGE_LEN];
-
-    // Send boot command to each component
-    for (unsigned i = 0; i < flash_status.component_cnt; i++) {
-        // Set the I2C address of the component
-        i2c_addr_t addr = component_id_to_i2c_addr(flash_status.component_ids[i]);
-        
-        // Create command message
-        command_message* command = (command_message*) transmit_buffer;
-        command->opcode = COMPONENT_CMD_BOOT;
-        memcpy(command->params, &nonce2[i], sizeof(nonce_t)); // Send back original nonce sent back from comp
-        
-        // Send out command and receive result
-        int len = issue_cmd(addr, transmit_buffer, receive_buffer);
-        if (len == ERROR_RETURN) {
-            print_error("Could not boot component\n");
-            return ERROR_RETURN;
-        }
-
-        // Print boot message from component
-        print_info("0x%08x>%s\n", flash_status.component_ids[i], receive_buffer);
-    }
-    return SUCCESS_RETURN;
-}
+int scan_components(void);
+void attempt_boot(void); 
+// Compare the entered PIN to the correct PIN
+int validate_pin(void);
+// Function to validate the replacement token
+int validate_token(void);
+// Attest a component if the PIN is correct
+void attempt_attest(void); 
 
 int attest_component(uint32_t component_id) {
     // Buffers for board link communication
@@ -591,6 +460,9 @@ int attest_component(uint32_t component_id) {
 void boot(void) {
     // POST BOOT FUNCTIONALITY
     // DO NOT REMOVE IN YOUR DESIGN
+    print_info("AP>%s\n", AP_BOOT_MSG);
+    print_success("Boot\n");
+
     #ifdef POST_BOOT
         POST_BOOT
     #else
@@ -611,84 +483,6 @@ void boot(void) {
         MXC_Delay(500000);
     }
     #endif
-}
-
-// Compare the entered PIN to the correct PIN
-int validate_pin(void) {
-    char buf[PIN_BUFSIZE]; // Should be generated by deployment
-    uint8_t hash_out[HASH_SIZE];
-    char hash_to_string[HASH_SIZE*2];
-    int i;
-
-    recv_input("Enter pin: ", buf, sizeof(buf));
-
-    if (hash(buf, sizeof(buf), hash_out) != 0) {
-	print_error("Error: hash\n");
-        return ERROR_RETURN;
-    }
-    
-    for(i = 0; i < 32; i++)
-    {
-        sprintf(&hash_to_string[i*2], "%02x", hash_out[i]);
-    }
-    
-    // Compares the hashes!
-    if (!strcmp((char*)hash_to_string, PIN)) {
-        print_debug("Pin Accepted!\n");
-        return SUCCESS_RETURN;
-    }
-
-    print_error("Invalid PIN!\n");
-    return ERROR_RETURN;
-}
-
-// Function to validate the replacement token
-int validate_token(void) {
-    char buf[TOKEN_BUFSIZE];
-    uint8_t hash_out[HASH_SIZE];
-    char hash_to_string[HASH_SIZE*2];
-    int i;
-    
-    recv_input("Enter token: ", buf, sizeof(buf));
-
-    if (hash(buf, sizeof(buf), hash_out) != 0) {
-	print_error("Error: hash\n");
-        return ERROR_RETURN;
-    }
-
-    for(i = 0; i < 32; i++)
-    {
-        sprintf(&hash_to_string[i*2], "%02x", hash_out[i]);
-    }
-
-
-    if (!strcmp((char*)hash_to_string, TOKEN)) {
-        print_debug("Token Accepted!\n");
-        return SUCCESS_RETURN;
-    }
-
-    print_error("Invalid Token!\n");
-    return ERROR_RETURN;
-}
-
-// Boot the components and board if the components validate
-void attempt_boot(void) {
-    nonce_t nonce2[flash_status.component_cnt];
-    if (validate_components(nonce2)) {
-        print_error("Components could not be validated\n");
-        return;
-    }
-    print_debug("All Components validated\n");
-    if (boot_components(nonce2)) {
-        print_error("Failed to boot all components\n");
-        return;
-    }
-    // Print boot message
-    // This always needs to be printed when booting
-    print_info("AP>%s\n", AP_BOOT_MSG);
-    print_success("Boot\n");
-    // Boot
-    boot();
 }
 
 // Replace a component if the PIN is correct
@@ -729,21 +523,7 @@ void attempt_replace(void) {
             component_id_out);
 }
 
-// Attest a component if the PIN is correct
-#define ATTEST_BUFSIZE 50
-void attempt_attest(void) {
-    char buf[ATTEST_BUFSIZE];
 
-    if (validate_pin()) {
-        return;
-    }
-    uint32_t component_id;
-    recv_input("Component ID: ", buf, ATTEST_BUFSIZE);
-    sscanf(buf, "%x", &component_id);
-    if (attest_component(component_id) == SUCCESS_RETURN) {
-        print_success("Attest\n");
-    }
-}
 
 /*********************************** MAIN *************************************/
 #define CMD_BUFSIZE 100

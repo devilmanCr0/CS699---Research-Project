@@ -12,6 +12,10 @@
 # **********************************************************
 
 # Add your config here!
+# Adding our custom Rust library here
+LIBS += app_lib/target/thumbv7em-none-eabi/release/libapp_lib.a
+# We need to build our rust
+$(shell cd app_lib/ && cargo build --release)
 
 # This example is only compatible with the FTHR board,
 # so we override the BOARD value to hard-set it.
