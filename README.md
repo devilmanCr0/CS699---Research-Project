@@ -1,5 +1,5 @@
-# eCTF-Monorepo_2024
-Monorepo for MITRE eCTF code, documentation, and writeups
+# CS699 Research Project - eCTF MonoRepo 2024
+Research Project, part of MITRE eCTF - contains code, documentation, and writeups
 
 ## Layout
 - ``Attack``: Contains code for the attack phase.
@@ -41,7 +41,7 @@ through these included tools.
 
 Source code and tooling is provided that runs directly on the host. All of these tools are 
 created in Python. The tools can be easily installed with the use of Poetry. Once inside 
-of the activated Nix environment, run `poetry install` to initialize the Poetry environment. 
+of the activated Nix environment - which is `nix-shell` in the main directory, run `poetry install` to initialize the Poetry environment so you could run the tools below. 
 These tools can be invoked either through `poetry run {toolname}` or by activating the poetry environment
 with `poetry shell` and then running as standard python programs.
 
